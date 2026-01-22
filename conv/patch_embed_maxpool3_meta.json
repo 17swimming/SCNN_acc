@@ -1,0 +1,10 @@
+{
+  "module_name": "patch_embed_maxpool3",
+  "output_shape": [
+    512,
+    384,
+    8,
+    8
+  ],
+  "output_filename": "patch_embed_maxpool3_output.npy"
+}

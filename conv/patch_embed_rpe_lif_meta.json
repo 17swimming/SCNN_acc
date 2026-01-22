@@ -1,0 +1,12 @@
+{
+  "module_name": "patch_embed_rpe_lif",
+  "output_shape": [
+    4,
+    128,
+    384,
+    8,
+    8
+  ],
+  "output_filename": "patch_embed_rpe_lif_output.npy",
+  "data_type": "uint8"
+}

@@ -1,0 +1,12 @@
+{
+  "module_name": "patch_embed_proj_lif3",
+  "output_shape": [
+    4,
+    128,
+    384,
+    16,
+    16
+  ],
+  "output_filename": "patch_embed_proj_lif3_output.npy",
+  "data_type": "uint8"
+}
