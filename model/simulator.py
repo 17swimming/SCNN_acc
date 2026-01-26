@@ -54,36 +54,105 @@ class PE:
         # todo，在pe内创建旋转180度后的卷积核（仅对H和W维度旋转）
         kernel_180 = torch.rot90(kernel_block, k=2, dims=[1, 2])
         
-        # 串行处理每个Cin（根据配置，每次只能计算一个Cin）
-        for cin in range(in_c):
-            # 提取当前Cin的输入和卷积核
-            current_input = input_block[cin, :, :]
-            current_kernel = kernel_180[cin, :, :]
+        # # 串行处理每个Cin（根据配置，每次只能计算一个Cin）
+        # for cin in range(in_c):
+        #     # 提取当前Cin的输入和卷积核
+        #     current_input = input_block[cin, :, :]
+        #     current_kernel = kernel_180[cin, :, :]
             
-            # 对输入矩阵每个非零元素进行事件驱动计算
-            for i in range(in_h):
-                for j in range(in_w):
-                    if current_input[i, j] != 0:  # 支持非二进制输入
-                        # 确定卷积核旋转后的有效区域
-                        a = max(0, 2 - i)
-                        b = 2 if (i < out_h) else 5 - i
-                        c = max(0, 2 - j)
-                        d = 2 if (j < out_w) else 5 - j
-                        kernel_add = current_kernel[a:b+1, c:d+1]
+        #     # 对输入矩阵每个非零元素进行事件驱动计算
+        #     for i in range(in_h):
+        #         for j in range(in_w):
+        #             if current_input[i, j] != 0:  # 支持非二进制输入
+        #                 # 确定卷积核旋转后的有效区域
+        #                 a = max(0, 2 - i)
+        #                 b = 2 if (i < out_h) else 5 - i
+        #                 c = max(0, 2 - j)
+        #                 d = 2 if (j < out_w) else 5 - j
+        #                 kernel_add = current_kernel[a:b+1, c:d+1]
                         
-                        # 确定有效区域在输出矩阵中的位置
-                        m = i if (i < out_h) else out_h - 1
-                        n = j if (j < out_w) else out_w - 1
-                        x = m - (b - a)
-                        y = n - (d - c)
+        #                 # 确定有效区域在输出矩阵中的位置
+        #                 m = i if (i < out_h) else out_h - 1
+        #                 n = j if (j < out_w) else out_w - 1
+        #                 x = m - (b - a)
+        #                 y = n - (d - c)
                         
-                        # 累加操作
-                        output_block[0, x:m+1, y:n+1] += current_input[i, j] * kernel_add
+        #                 # 累加操作
+        #                 output_block[0, x:m+1, y:n+1] += current_input[i, j] * kernel_add
                         
-                        # 统计累加次数
-                        self.add_num += kernel_add.numel()
-                        # 假设每个spike仅需一拍即可完成计算
-                        self.cycle_num += 1
+        #                 # 统计累加次数
+        #                 self.add_num += kernel_add.numel()
+        #                 # 假设每个spike仅需一拍即可完成计算
+        #                 self.cycle_num += 1
+        
+        # 一次处理k个cin，对k*in_h*in_w大小的块，将脉冲的位置拆分至3个数组
+        # nornal列表存储j < oh and i < ow的，
+        # sub列表存储j >= oh 的
+        # right列表存储j < oh and i >= ow的，
+        # 三个列表中数据每次弹出一个，这样称为一个pack。每个pack中根据三个i、j分别去取3个kernel_add以及xymn，然后再和output_block做累加，即一次处理三个脉冲了
+        # 注意，需要区分Cin，因为不同cin的kernel_add是不同的，所以需要根据cin来取不同的kernel_add
+        k = 1  # 这里k=1，根据实际配置可以调整
+        for cin_group in range(0, in_c, k):
+            # 提取当前组的Cin范围
+            cin_end = min(cin_group + k, in_c)
+            current_input_group = input_block[cin_group:cin_end, :, :]
+            current_kernel_group = kernel_180[cin_group:cin_end, :, :]
+            
+            # 初始化三个列表
+            normal_list = []  # 存储j < oh and i < ow的
+            sub_list = []     # 存储j > oh 的
+            right_list = []   # 存储j < oh and i > ow的
+            
+            # 收集所有非零元素的位置和值
+            for cin in range(current_input_group.shape[0]):
+                for i in range(in_h):
+                    for j in range(in_w):
+                        if current_input_group[cin, i, j] != 0:  # 支持非二进制输入
+                            # 确定卷积核旋转后的有效区域
+                            a = max(0, 2 - i)
+                            b = 2 if (i < out_h) else 5 - i
+                            c = max(0, 2 - j)
+                            d = 2 if (j < out_w) else 5 - j
+                            kernel_add = current_kernel_group[cin, a:b+1, c:d+1]
+                            
+                            # 确定有效区域在输出矩阵中的位置
+                            m = i if (i < out_h) else out_h - 1
+                            n = j if (j < out_w) else out_w - 1
+                            x = m - (b - a)
+                            y = n - (d - c)
+                            
+                            # 根据位置分类
+                            spike_info = (cin, i, j, current_input_group[cin, i, j], kernel_add, x, m, y, n)
+                            if j < out_w and i < out_h:
+                                normal_list.append(spike_info)
+                            elif j >= out_w:
+                                sub_list.append(spike_info)
+                            elif j < out_w and i >= out_h:
+                                right_list.append(spike_info)
+            
+            # 处理pack，每次从三个列表各取一个
+            while normal_list or sub_list or right_list:
+                # 从三个列表各弹出一个数据
+                pack = []
+                if normal_list:
+                    pack.append(normal_list.pop(0))
+                if sub_list:
+                    pack.append(sub_list.pop(0))
+                if right_list:
+                    pack.append(right_list.pop(0))
+                
+                # 处理pack中的每个spike
+                for spike_info in pack:
+                    cin, i, j, value, kernel_add, x, m, y, n = spike_info
+                    # 累加操作
+                    output_block[0, x:m+1, y:n+1] += value * kernel_add
+                    
+                    # 统计累加次数
+                    self.add_num += kernel_add.numel()
+                
+                # 假设每个pack仅需一拍即可完成计算
+                self.cycle_num += 1
+
         
         # 计算输入块的稀疏度
         total_elements = in_c * in_h * in_w
@@ -325,70 +394,115 @@ class OutProductSimulator:
         # 计算需要多少个group来处理所有Cout
         # 每个group包含8个Cout，对应8个core
         num_groups = Cout // self.num_cores
-        print(f"{Cout}个输出通道,需要分成{num_groups}个group")
+        # print(f"{Cout}个输出通道,需要分成{num_groups}个group")
         
        
         #tag,每个核处理时，先把所有时间步算完，膜电位就无需再切换，因为batch之间膜电位独立，time step之间膜电位有顺序
         for b in range(B):
             for t in range(T):
                 # 按group处理Cout,直到得到一个时间步的完整输出特征图
-                print("---------------batch:", b, "time step:", t,"----------------")
-                for group_idx in range(num_groups):
-                     # 获取当前T和B的输入张量 [Cin,H,W]
-                    # todo,由于没有片上RAM限制，这里假设整个输入张量都可以 fit in memory
-                    print(f"--------group_idx:{group_idx}------------")
-                    current_input = input_tensor[t, b, :, :]
-                    # 计算当前group的Cout起始和结束索引
-                    cout_start = group_idx * self.num_cores
-                    cout_end = min(cout_start + self.num_cores, Cout)
+                print("-batch:", b, "time step:", t,"-")
+                group_idx = 0
+                    # 获取当前T和B的输入张量 [Cin,H,W]
+                # todo,由于没有片上RAM限制，这里假设整个输入张量都可以 fit in memory
+                # print(f"------group_idx:{group_idx}------")
+                current_input = input_tensor[t, b, :, :]
+                # 计算当前group的Cout起始和结束索引
+                cout_start = group_idx * self.num_cores
+                cout_end = min(cout_start + self.num_cores, Cout)
+                
+                # 计算当前group实际处理的Cout数量
+                current_group_size = cout_end - cout_start
+                
+                # 每个core对应一个Cout，并行处理当前group内的Cout
+                for i in range(current_group_size):
+                    cout_idx = cout_start + i
+                    # 获取当前Cout对应的卷积核 [Cin,k_h,k_w]
+                    current_kernel = kernel_tensor[cout_idx, :, :, :]
                     
-                    # 计算当前group实际处理的Cout数量
-                    current_group_size = cout_end - cout_start
+                    # 分配到对应的core处理
+                    core = self.cores[i]  # 每个group内的Cout按顺序分配给core
                     
-                    # 每个core对应一个Cout，并行处理当前group内的Cout
-                    for i in range(current_group_size):
-                        cout_idx = cout_start + i
-                        # 获取当前Cout对应的卷积核 [Cin,k_h,k_w]
-                        current_kernel = kernel_tensor[cout_idx, :, :, :]
-                        
-                        # 分配到对应的core处理
-                        core = self.cores[i]  # 每个group内的Cout按顺序分配给core
-                        
-                        # 执行卷积计算（所有core共享相同的input_tensor），这个时候的current_input还没有padding
-                        # 控制是否打印core信息，只打印一次
-                        if self.print_core_info:
-                            output_tile, core_stats = core.process(current_input, current_kernel, padding, stride)
-                            self.print_core_info = False  # 打印一次后关闭
-                        else:
-                            # 不打印信息时，暂时修改core的print_info属性
-                            # original_print_info = core.print_info
-                            core.print_info = False
-                            output_tile, core_stats = core.process(current_input, current_kernel, padding, stride)
-                            # core.print_info = original_print_info  # 恢复原始值
-                        
-                        # 将结果写入输出张量
-                        output_tensor[t, b, cout_idx, :, :] = output_tile[0, :, :]
-                        
-                        # 汇总统计信息（core并行工作，取最大周期数）
-                        self.global_stats.num_ops += core_stats.num_ops   
-                        self.global_stats.num_tiles += core.total_tile_num  # 更新整体tile数量统计，这个信息不重要了
-                        group_compute_cycles = core_stats.compute_cycles   
-                        group_total_cycles = core_stats.total_cycles
+                    # 执行卷积计算（所有core共享相同的input_tensor），这个时候的current_input还没有padding
+                    # 控制是否打印core信息，只打印一次
+                    if self.print_core_info:
+                        output_tile, core_stats = core.process(current_input, current_kernel, padding, stride)
+                        self.print_core_info = False  # 打印一次后关闭
+                    else:
+                        # 不打印信息时，暂时修改core的print_info属性
+                        # original_print_info = core.print_info
+                        core.print_info = False
+                        output_tile, core_stats = core.process(current_input, current_kernel, padding, stride)
+                        # core.print_info = original_print_info  # 恢复原始值
+                    
+                    # 将结果写入输出张量
+                    output_tensor[t, b, cout_idx, :, :] = output_tile[0, :, :]
+                    
+                    # 汇总统计信息（core并行工作，周期数都一样）
+                    self.global_stats.num_ops += core_stats.num_ops   
+                    self.global_stats.num_tiles += core.total_tile_num  # 更新整体tile数量统计，这个信息不重要了
+                    group_compute_cycles = core_stats.compute_cycles   
+                    group_total_cycles = core_stats.total_cycles
 
-                        #在这里打印core信息也行吧
-                    # 所有core的计算周期数是一样的,随便取一个就好
-                    self.global_stats.total_cycles += group_total_cycles
-                    self.global_stats.compute_cycles += group_compute_cycles
+                    #在这里打印core信息也行吧
+                # 所有core的计算周期数是一样的,随便取一个就好
+                # print(f"group_compute_cycles:{group_compute_cycles},group_total_cycles:{group_total_cycles}")
+                #由于每个group的计算过程相同，周期数只需要计算一次然后乘以循环次数
+                self.global_stats.total_cycles += group_total_cycles * num_groups
+                self.global_stats.compute_cycles += group_compute_cycles * num_groups
+                # for group_idx in range(num_groups):
+                #      # 获取当前T和B的输入张量 [Cin,H,W]
+                #     # todo,由于没有片上RAM限制，这里假设整个输入张量都可以 fit in memory
+                #     print(f"--------group_idx:{group_idx}------------")
+                #     current_input = input_tensor[t, b, :, :]
+                #     # 计算当前group的Cout起始和结束索引
+                #     cout_start = group_idx * self.num_cores
+                #     cout_end = min(cout_start + self.num_cores, Cout)
+                    
+                #     # 计算当前group实际处理的Cout数量
+                #     current_group_size = cout_end - cout_start
+                    
+                #     # 每个core对应一个Cout，并行处理当前group内的Cout
+                #     for i in range(current_group_size):
+                #         cout_idx = cout_start + i
+                #         # 获取当前Cout对应的卷积核 [Cin,k_h,k_w]
+                #         current_kernel = kernel_tensor[cout_idx, :, :, :]
+                        
+                #         # 分配到对应的core处理
+                #         core = self.cores[i]  # 每个group内的Cout按顺序分配给core
+                        
+                #         # 执行卷积计算（所有core共享相同的input_tensor），这个时候的current_input还没有padding
+                #         # 控制是否打印core信息，只打印一次
+                #         if self.print_core_info:
+                #             output_tile, core_stats = core.process(current_input, current_kernel, padding, stride)
+                #             self.print_core_info = False  # 打印一次后关闭
+                #         else:
+                #             # 不打印信息时，暂时修改core的print_info属性
+                #             # original_print_info = core.print_info
+                #             core.print_info = False
+                #             output_tile, core_stats = core.process(current_input, current_kernel, padding, stride)
+                #             # core.print_info = original_print_info  # 恢复原始值
+                        
+                #         # 将结果写入输出张量
+                #         output_tensor[t, b, cout_idx, :, :] = output_tile[0, :, :]
+                        
+                #         # 汇总统计信息（core并行工作，周期数都一样）
+                #         self.global_stats.num_ops += core_stats.num_ops   
+                #         self.global_stats.num_tiles += core.total_tile_num  # 更新整体tile数量统计，这个信息不重要了
+                #         group_compute_cycles = core_stats.compute_cycles   
+                #         group_total_cycles = core_stats.total_cycles
+
+                #         #在这里打印core信息也行吧
+                #     # 所有core的计算周期数是一样的,随便取一个就好
+                #     self.global_stats.total_cycles += group_total_cycles
+                #     self.global_stats.compute_cycles += group_compute_cycles
         
         # 打印整体统计信息
-        print("\n=== 整体统计信息 ===")
-        print(f"Total Cycles: {self.global_stats.total_cycles}")
-        print(f"Compute Cycles: {self.global_stats.compute_cycles}")
-        print(f"Total Operations: {self.global_stats.num_ops}")
+        # print("\n=== 整体统计信息 ===")
+        # print(f"Total Cycles: {self.global_stats.total_cycles}")
+        # print(f"Compute Cycles: {self.global_stats.compute_cycles}")
+        # print(f"Total Operations: {self.global_stats.num_ops}")
         # print(f"Total Tiles: {self.global_stats.num_tiles}")
-        
-        # 移除了打印各Core统计信息的代码，因为现在在core.process()方法结束后会直接打印
-        # 这样可以看到每个core计算一个Cout时的实时信息
         
         return output_tensor, self.global_stats
 

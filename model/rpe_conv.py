@@ -2,6 +2,7 @@ import numpy as np
 import torch
 import matplotlib.pyplot as plt
 import time
+import math
 
 # baseline
 # 直接卷积结果，padding为1（用0填充），步长为1
@@ -157,7 +158,7 @@ def convolution_out_product(input_tensor, kernel_tensor, padding=1, stride=1):
     # for T——B——Cin，统计每个in_h和in_w，最后结果再乘一个Cout就够了，因为都是相同的
     for t in range(T):
         for b in range(Batch):
-                print(f"T: {t}, B: {b}")
+                print(f"-----T: {t}, B: {b}------")
             # for cout in range(Cout):
                 conv_result_cin = torch.zeros(output_tensor.shape[-2:], dtype=kernel_tensor.dtype, device=input_tensor.device)              
                 for cin in range(Cin):
@@ -186,8 +187,8 @@ def convolution_out_product(input_tensor, kernel_tensor, padding=1, stride=1):
     
     # 注释了Cout，因为各个Cout的累加次数是一样的，直接乘就好了
     total_add_num = total_add_num * Cout
-
-    
+    total_cycle_num = total_cycle_num * Cout
+    total_tile_num = total_tile_num * Cout
     return output_tensor, total_add_num, total_cycle_num, total_tile_num
 
 # done,再定义一个函数，用于用内积完成所有通道的卷积
@@ -259,85 +260,10 @@ def convolution_inner_product(input_tensor, kernel_tensor, padding=1, stride=1):
 
 def main():
     start_time = time.time()
-    
-# 验证基本卷积正确性
-    # # 初始化一个4*4的稀疏矩阵，里面值为0/1
-    # sparse_matrix = np.zeros((4, 4), dtype=int)
-    # np.random.seed(42)  # 设置随机种子以确保结果可复现
-    # num_ones = int(4 * 4 * 0.3)  # 10%的稀疏度
-    # indices = np.random.choice(4*4, num_ones, replace=False)
-    # sparse_matrix.flat[indices] = 1
-    # print("原始稀疏矩阵:")
-    # print(sparse_matrix)
-
-#验证tile正确性
-    # # 初始化一个4*8的稀疏矩阵，里面值为0/1, 
-    # sparse_matrix = np.zeros((4, 8), dtype=int)
-    # #指定‘1’的位置，（0，0）、（0，4）、(0,5)、（1，3）便于调试
-    # indices = [0, 4, 5, 11]
-    # sparse_matrix.flat[indices] = 1
-    # print("原始稀疏矩阵:")
-    # print(sparse_matrix)
-
-    # # 初始化一个32*32的稀疏矩阵，里面值为0/1
-    # sparse_matrix = np.zeros((32, 32), dtype=int)
-    # np.random.seed(42)  # 设置随机种子以确保结果可复现  
-    # num_ones = int(32 * 32 * 0.1)  # 10%的稀疏度
-    # indices = np.random.choice(32*32, num_ones, replace=False)
-    # sparse_matrix.flat[indices] = 1
-
-
-    # # 初始化卷积核3*3，值为0-8
-    # conv_kernel = np.arange(9).reshape(3, 3)
-
-    # add_num_baseline = 0
-    # add_num_out_product = 0
-    # tile_num_out_product = 0
-    # # 执行卷积运算
-    # conv_result_baseline, add_num_baseline = convolution_with_padding(sparse_matrix, conv_kernel, padding=1, stride=1)
-    # conv_result_out_product, add_num_out_product, tile_num_out_product   = convolution_with_padding_out_product(sparse_matrix, conv_kernel, padding=1, stride=1)
-    # # print("基于外积的卷积结果:")
-    # # print(conv_result_out_product)
-    # print(f"基于外积的卷积结果所需累加次数: {add_num_out_product}，分块数量: {tile_num_out_product}")
-
-    # # print("基于基本卷积的卷积结果:")
-    # # print(conv_result_baseline)
-    # print(f"基于基本卷积的卷积结果所需累加次数: {add_num_baseline}")
-
-    # print(f"外积卷积相对于基本卷积的计算量: {add_num_out_product/add_num_baseline:.2f}")
-
-    # # 比较两种卷积结果是否相等
-    # print(np.array_equal(conv_result_baseline, conv_result_out_product))
-    # print("卷积结果计算完成。")
-
-# 多通道测试，验证convolution_inner_product函数正确性
-    # # 生成简单的输入张量和卷积核张量，输入张量里的值为0/1，卷积核张量里的值为固定顺序
-    # T, Batch, Cin, in_h, in_w = 2, 2, 2, 4, 4
-    # Cout = 2
-    
-    # # 直接使用PyTorch创建稀疏输入张量：只有几个位置为1，其余为0
-    # input_tensor = torch.zeros(T, Batch, Cin, in_h, in_w, dtype=torch.float32)
-    
-    # # 在输入张量中随机设置一些1的位置
-    # torch.manual_seed(42)  # 设置随机种子以确保结果可复现
-    # num_ones = int(T * Batch * Cin * in_h * in_w * 0.1)  # 10%的稀疏度
-    # indices = torch.randperm(T*Batch*Cin*in_h*in_w)[:num_ones]
-    # input_tensor.view(-1)[indices] = 1
-    
-    # # 直接使用PyTorch创建卷积核张量：所有输出通道和输入通道的卷积核都使用0-8的顺序值
-    # kernel_values = torch.arange(9, dtype=torch.float32).reshape(3, 3)
-    # kernel_tensor = kernel_values.repeat(Cout, Cin, 1, 1)
-    
-    # convolution_result_inner_product = convolution_inner_product(input_tensor, kernel_tensor, padding=1, stride=1)
-    # convolution_result_out_product,total_add_num_out_product = convolution_out_product(input_tensor, kernel_tensor, padding=1, stride=1)
-    
-    # # 比较结果是否相等
-    # print(torch.allclose(convolution_result_inner_product, convolution_result_out_product))
-
 #使用真实数据测试
     #读取npy文件,lif3的输出不是rpe卷积的输入，maxpool3的输出才是rep卷积的输入
     # input_tensor = np.load('../conv/patch_embed_proj_lif3_output.npy')
-    input_tensor = np.load('../conv/patch_embed_maxpool3_output.npy') #TB合并了
+    input_tensor = np.load('../conv/patch_embed_rpe_conv_input.npy') #TB合并了
     input_tensor = torch.from_numpy(input_tensor)
     print("input_tensor的稀疏度：", (input_tensor == 0).sum() / input_tensor.numel())
     
@@ -372,7 +298,7 @@ def main():
     Atomic_c = 64        #一次可以计算64个Cin
     nvdla_mac_num = 16   #那就是一次可以计算16个Cout
     # 稠密计算，
-    latency_estimation_nvdla = total_add_num_inner_product/(Atomic_c*nvdla_mac_num)
+    latency_estimation_nvdla = oh * ow * 9  * T * B * math.ceil(Cout/nvdla_mac_num) * math.ceil(Cin/Atomic_c) 
 
     print("外积所需拍数：", latency_estimation_out_product)
     print("内积所需拍数：", latency_estimation_nvdla)

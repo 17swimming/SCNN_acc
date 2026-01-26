@@ -132,7 +132,6 @@ def convolution_with_out_product(input_matrix, kernel):
     return output,add_num,cycle_num            
 
 
-# todo,定义一个函数，convolution_with_padding_out_product只能处理二维矩阵。这个函数实现Cin个通道的卷积。
 # 怎么映射呢
 #就拿不同排序算法来说，不同for循环写法会导致不同的计算量。
 #这里有T维度，就得考虑怎么复用weight————似乎和计算量无关
@@ -156,34 +155,39 @@ def convolution_out_product(input_tensor, kernel_tensor, padding=1, stride=1):
     # for T——B——Cin，统计每个in_h和in_w，最后结果再乘一个Cout就够了，因为都是相同的
     for t in range(T):
         for b in range(Batch):
-            for cout in range(Cout):
-                conv_result_cin = torch.zeros(output_tensor.shape[-2:], dtype=kernel_tensor.dtype, device=input_tensor.device)              
-                for cin in range(Cin):
-                    # 提取当前输入通道和卷积核
-                    input_matrix = input_tensor[t, b, cin]
-                    kernel = kernel_tensor[cout, cin]
-                    # kernel = kernel_tensor[0, cin]  # 这里只处理一个通道来统计计算量和cycle
-                                        
-                    # 调用外积实现的卷积函数
-                    conv_result_cin_np, add_num, cycle_num, tile_num = convolution_with_padding_out_product(input_matrix, kernel, padding, stride) 
-                    
-                    # 累加到输出中
-                    conv_result_cin += conv_result_cin_np
-                    total_add_num += add_num
-                    total_cycle_num += cycle_num
-                    total_tile_num += tile_num
+            # for cout in range(Cout):
+            # 仅估算一个cout，因为都是相同的
+            cout = 0
+            conv_result_cin = torch.zeros(output_tensor.shape[-2:], dtype=kernel_tensor.dtype, device=input_tensor.device)              
+            for cin in range(Cin):
+                # 提取当前输入通道和卷积核
+                input_matrix = input_tensor[t, b, cin]
+                kernel = kernel_tensor[cout, cin]
+                # kernel = kernel_tensor[0, cin]  # 这里只处理一个通道来统计计算量和cycle
+                                    
+                # 调用外积实现的卷积函数
+                conv_result_cin_np, add_num, cycle_num, tile_num = convolution_with_padding_out_product(input_matrix, kernel, padding, stride) 
+                
+                # 累加到输出中
+                conv_result_cin += conv_result_cin_np
+                total_add_num += add_num
+                total_cycle_num += cycle_num
+                total_tile_num += tile_num
 
-                #    # 硬件测试模式3，打印通道，结果矩阵
-                #     print(f"计算至输入通道{cin}，卷积核：\n",kernel)
-                #     print(f"输出结果：\n",conv_result_cin)
+            #    # 硬件测试模式3，打印通道，结果矩阵
+            #     print(f"计算至输入通道{cin}，卷积核：\n",kernel)
+            #     print(f"输出结果：\n",conv_result_cin)
 
-                # 将累加结果保存到输出张量中
-                print(f"计算至输出通道{cout}\n")
-                output_tensor[t, b, cout] += conv_result_cin
-                # output_tensor[t, b,0] += conv_result_cin
+            # 将累加结果保存到输出张量中
+            # print(f"计算至输出通道{cout}\n")
+            output_tensor[t, b, cout] += conv_result_cin
+            # output_tensor[t, b,0] += conv_result_cin
+    total_add_num = total_add_num * Cout
+    total_cycle_num = total_cycle_num * Cout
+    total_tile_num = total_tile_num * Cout
 
     
-    return output_tensor, total_add_num, total_cycle_num
+    return output_tensor, total_add_num, total_cycle_num, total_tile_num
 
 # done,再定义一个函数，用于用内积完成所有通道的卷积
 #先img2col，TBCHW——>M*K,  卷积核K*N ，输出M*N,使用矩阵乘完成计算，再reshape回TBCHW
@@ -212,10 +216,10 @@ def convolution_inner_product(input_tensor, kernel_tensor, padding=1, stride=1):
     # 创建一个空的矩阵来存储所有的卷积窗口
     M = TB * out_h * out_w
     K = Cin * k_h * k_w
-    input_col = torch.zeros(M, K)
+    # 使用与权重相同的数据类型
+    input_col = torch.zeros(M, K, dtype=kernel_tensor.dtype, device=input_flattened.device)
     
-    # 手动提取所有卷积窗口
-    # 遍历每个输出位置
+    # 手动提取所有卷积窗口，遍历每个输出位置
     row_idx = 0
     for tb in range(TB):
         for h_out in range(out_h):
@@ -305,66 +309,66 @@ def main():
     # print("卷积结果计算完成。")
 
 # 多通道测试，验证convolution_inner_product函数正确性
-    # # 生成简单的输入张量和卷积核张量，输入张量里的值为0/1，卷积核张量里的值为固定顺序
-    # T, Batch, Cin, in_h, in_w = 2, 2, 2, 4, 4
-    # Cout = 2
+    # 生成简单的输入张量和卷积核张量，输入张量里的值为0/1，卷积核张量里的值为固定顺序
+    T, Batch, Cin, in_h, in_w = 2, 2, 2, 4, 4
+    Cout = 2
     
-    # # 直接使用PyTorch创建稀疏输入张量：只有几个位置为1，其余为0
-    # input_tensor = torch.zeros(T, Batch, Cin, in_h, in_w, dtype=torch.float32)
+    # 直接使用PyTorch创建稀疏输入张量：只有几个位置为1，其余为0
+    input_tensor = torch.zeros(T, Batch, Cin, in_h, in_w, dtype=torch.float32)
     
-    # # 在输入张量中随机设置一些1的位置
-    # torch.manual_seed(42)  # 设置随机种子以确保结果可复现
-    # num_ones = int(T * Batch * Cin * in_h * in_w * 0.1)  # 10%的稀疏度
-    # indices = torch.randperm(T*Batch*Cin*in_h*in_w)[:num_ones]
-    # input_tensor.view(-1)[indices] = 1
+    # 在输入张量中随机设置一些1的位置
+    torch.manual_seed(42)  # 设置随机种子以确保结果可复现
+    num_ones = int(T * Batch * Cin * in_h * in_w * 0.1)  # 10%的稀疏度
+    indices = torch.randperm(T*Batch*Cin*in_h*in_w)[:num_ones]
+    input_tensor.view(-1)[indices] = 1
     
-    # # 直接使用PyTorch创建卷积核张量：所有输出通道和输入通道的卷积核都使用0-8的顺序值
-    # kernel_values = torch.arange(9, dtype=torch.float32).reshape(3, 3)
-    # kernel_tensor = kernel_values.repeat(Cout, Cin, 1, 1)
+    # 直接使用PyTorch创建卷积核张量：所有输出通道和输入通道的卷积核都使用0-8的顺序值
+    kernel_values = torch.arange(9, dtype=torch.float32).reshape(3, 3)
+    kernel_tensor = kernel_values.repeat(Cout, Cin, 1, 1)
     
-    # convolution_result_inner_product = convolution_inner_product(input_tensor, kernel_tensor, padding=1, stride=1)
-    # convolution_result_out_product,total_add_num_out_product = convolution_out_product(input_tensor, kernel_tensor, padding=1, stride=1)
+    convolution_result_inner_product = convolution_inner_product(input_tensor, kernel_tensor, padding=1, stride=1)
+    convolution_result_out_product,total_add_num_out_product,total_cycle_num_out_product,total_tile_num_out_product = convolution_out_product(input_tensor, kernel_tensor, padding=1, stride=1)
     
-    # # 比较结果是否相等
-    # print(torch.allclose(convolution_result_inner_product, convolution_result_out_product))
+    # 比较结果是否相等
+    print(torch.allclose(convolution_result_inner_product, convolution_result_out_product))
 
 #使用真实数据测试
     #读取npy文件
-    input_tensor = np.load('../conv/patch_embed_proj_lif1_output.npy')
-    input_tensor = torch.from_numpy(input_tensor)
-    T,B,Cin,h,w = input_tensor.shape
+    # input_tensor = np.load('../conv/patch_embed_proj_lif1_output.npy')
+    # input_tensor = torch.from_numpy(input_tensor)
+    # T,B,Cin,h,w = input_tensor.shape
 
-    output_tensor = np.load('../conv/patch_embed_proj_lif2_output.npy')
-    T,B,Cout,oh,ow = output_tensor.shape
+    # output_tensor = np.load('../conv/patch_embed_proj_lif2_output.npy')
+    # T,B,Cout,oh,ow = output_tensor.shape
 
-    # 生成kenel，所有输出通道和输入通道的卷积核都使用0-8的顺序值
-    kernel_values = torch.arange(9, dtype=torch.float32).reshape(3, 3)
-    kernel_tensor = kernel_values.repeat(Cout, Cin, 1, 1)
+    # # 生成kenel，所有输出通道和输入通道的卷积核都使用0-8的顺序值
+    # kernel_values = torch.arange(9, dtype=torch.float32).reshape(3, 3)
+    # kernel_tensor = kernel_values.repeat(Cout, Cin, 1, 1)
 
-    # convolution_result_inner_product = convolution_inner_product(input_tensor, kernel_tensor, padding=1, stride=1)
-    convolution_result_out_product,total_add_num_out_product,total_cycle_num_out_product,_ = convolution_out_product(input_tensor, kernel_tensor, padding=1, stride=1)
-    total_add_num_inner_product =  ow * oh * Cin * 9 * Cout * T * B
-    # 比较结果是否相等
-    # print("内积与外积结果是否一致：", torch.allclose(convolution_result_inner_product, convolution_result_out_product))
-    print("外积所需累加次数：", total_add_num_out_product)
-    print("内积所需累加次数：", total_add_num_inner_product)
-    print("外积相较于内积所需累加次数：", total_add_num_out_product/total_add_num_inner_product)
+    # # convolution_result_inner_product = convolution_inner_product(input_tensor, kernel_tensor, padding=1, stride=1)
+    # convolution_result_out_product,total_add_num_out_product,total_cycle_num_out_product,_ = convolution_out_product(input_tensor, kernel_tensor, padding=1, stride=1)
+    # total_add_num_inner_product =  ow * oh * Cin * 9 * Cout * T * B
+    # # 比较结果是否相等
+    # # print("内积与外积结果是否一致：", torch.allclose(convolution_result_inner_product, convolution_result_out_product))
+    # print("外积所需累加次数：", total_add_num_out_product)
+    # print("内积所需累加次数：", total_add_num_inner_product)
+    # print("外积相较于内积所需累加次数：", total_add_num_out_product/total_add_num_inner_product)
 
-    #估计latency
-    #我的硬件参数
-    pe_num = 4           #一个PE里计算oh=ow=4
-    core_num= 8          #那就是一次可以计算8个Cout
-    # total_cycle_num_out_product 是按照4 * 4串行处理得到的值，现在使用使用4个pe，8个core，会快32倍
-    latency_estimation_out_product = (total_cycle_num_out_product/pe_num/core_num)
-    # nvdla_large 的硬件参数
-    Atomic_c = 64        #一次可以计算64个Cin
-    nvdla_mac_num = 16   #那就是一次可以计算16个Cout
-    # 稠密计算，
-    latency_estimation_nvdla = total_add_num_inner_product/(Atomic_c*nvdla_mac_num)
+    # #估计latency
+    # #我的硬件参数
+    # pe_num = 4           #一个PE里计算oh=ow=4
+    # core_num= 8          #那就是一次可以计算8个Cout
+    # # total_cycle_num_out_product 是按照4 * 4串行处理得到的值，现在使用使用4个pe，8个core，会快32倍
+    # latency_estimation_out_product = (total_cycle_num_out_product/pe_num/core_num)
+    # # nvdla_large 的硬件参数
+    # Atomic_c = 64        #一次可以计算64个Cin
+    # nvdla_mac_num = 16   #那就是一次可以计算16个Cout
+    # # 稠密计算，
+    # latency_estimation_nvdla = total_add_num_inner_product/(Atomic_c*nvdla_mac_num)
 
-    print("外积所需拍数：", latency_estimation_out_product)
-    print("内积所需拍数：", latency_estimation_nvdla)
-    print("加速比：", latency_estimation_nvdla/latency_estimation_out_product)
+    # print("外积所需拍数：", latency_estimation_out_product)
+    # print("内积所需拍数：", latency_estimation_nvdla)
+    # print("加速比：", latency_estimation_nvdla/latency_estimation_out_product)
 
 
 
