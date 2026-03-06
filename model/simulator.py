@@ -13,12 +13,14 @@ class PE:
     """
     #每次调用 pe.process() 时， add_num 和 cycle_num 只反映当前 tile 的统计信息
     #pe.stats 则反映该 PE 自创建以来处理所有 tile 的累计统计信息
-    def __init__(self, name, pe_id):
+    def __init__(self, name, pe_id, k=2):
         self.name = name
         self.pe_id = pe_id
         self.stats = Stats()   
         self.add_num = 0
         self.cycle_num = 0
+        self.k = k   #一次处理k个cin
+
     def process(self, input_block, kernel_block):
         """
         处理6x6xCin输入块和3x3xCin卷积核块，输出1x4x4的结果
@@ -54,106 +56,115 @@ class PE:
         # todo，在pe内创建旋转180度后的卷积核（仅对H和W维度旋转）
         kernel_180 = torch.rot90(kernel_block, k=2, dims=[1, 2])
         
-        # # 串行处理每个Cin（根据配置，每次只能计算一个Cin）
-        # for cin in range(in_c):
-        #     # 提取当前Cin的输入和卷积核
-        #     current_input = input_block[cin, :, :]
-        #     current_kernel = kernel_180[cin, :, :]
+        # -----------方法1： 串行处理每个Cin（根据配置，每次只能计算一个Cin）---------
+        for cin in range(in_c):
+            # 提取当前Cin的输入和卷积核
+            current_input = input_block[cin, :, :]
+            current_kernel = kernel_180[cin, :, :]
             
-        #     # 对输入矩阵每个非零元素进行事件驱动计算
-        #     for i in range(in_h):
-        #         for j in range(in_w):
-        #             if current_input[i, j] != 0:  # 支持非二进制输入
-        #                 # 确定卷积核旋转后的有效区域
-        #                 a = max(0, 2 - i)
-        #                 b = 2 if (i < out_h) else 5 - i
-        #                 c = max(0, 2 - j)
-        #                 d = 2 if (j < out_w) else 5 - j
-        #                 kernel_add = current_kernel[a:b+1, c:d+1]
+            # 对输入矩阵每个非零元素进行事件驱动计算
+            for i in range(in_h):
+                for j in range(in_w):
+                    if current_input[i, j] != 0:  # 支持非二进制输入
+                        # 确定卷积核旋转后的有效区域
+                        a = max(0, 2 - i)
+                        b = 2 if (i < out_h) else 5 - i
+                        c = max(0, 2 - j)
+                        d = 2 if (j < out_w) else 5 - j
+                        kernel_add = current_kernel[a:b+1, c:d+1]
                         
-        #                 # 确定有效区域在输出矩阵中的位置
-        #                 m = i if (i < out_h) else out_h - 1
-        #                 n = j if (j < out_w) else out_w - 1
-        #                 x = m - (b - a)
-        #                 y = n - (d - c)
+                        # 确定有效区域在输出矩阵中的位置
+                        m = i if (i < out_h) else out_h - 1
+                        n = j if (j < out_w) else out_w - 1
+                        x = m - (b - a)
+                        y = n - (d - c)
                         
-        #                 # 累加操作
-        #                 output_block[0, x:m+1, y:n+1] += current_input[i, j] * kernel_add
+                        # 累加操作
+                        output_block[0, x:m+1, y:n+1] += current_input[i, j] * kernel_add
                         
-        #                 # 统计累加次数
-        #                 self.add_num += kernel_add.numel()
-        #                 # 假设每个spike仅需一拍即可完成计算
-        #                 self.cycle_num += 1
-        
-        # 一次处理k个cin，对k*in_h*in_w大小的块，将脉冲的位置拆分至3个数组
+                        # 统计累加次数
+                        self.add_num += kernel_add.numel()
+                        # 假设每个spike仅需一拍即可完成计算
+                        self.cycle_num += 1
+        print(f"串行处理时，所有cin计算完需要{self.cycle_num}拍")
+
+        # -----------方法2： 一次处理k个cin，对k*in_h*in_w大小的块，将脉冲的位置拆分至3个数组---------
         # nornal列表存储j < oh and i < ow的，
         # sub列表存储j >= oh 的
         # right列表存储j < oh and i >= ow的，
         # 三个列表中数据每次弹出一个，这样称为一个pack。每个pack中根据三个i、j分别去取3个kernel_add以及xymn，然后再和output_block做累加，即一次处理三个脉冲了
         # 注意，需要区分Cin，因为不同cin的kernel_add是不同的，所以需要根据cin来取不同的kernel_add
-        k = 1  # 这里k=1，根据实际配置可以调整
-        for cin_group in range(0, in_c, k):
-            # 提取当前组的Cin范围
-            cin_end = min(cin_group + k, in_c)
-            current_input_group = input_block[cin_group:cin_end, :, :]
-            current_kernel_group = kernel_180[cin_group:cin_end, :, :]
+        # 由于三个数组长度不均衡，最长的那个决定计算cycle，加速比还是不明显
+        # k = self.k  
+        # for cin_group in range(0, in_c, k):
+        #     # 提取当前组的Cin范围
+        #     cin_end = min(cin_group + k, in_c)
+        #     current_input_group = input_block[cin_group:cin_end, :, :]
+        #     current_kernel_group = kernel_180[cin_group:cin_end, :, :]
             
-            # 初始化三个列表
-            normal_list = []  # 存储j < oh and i < ow的
-            sub_list = []     # 存储j > oh 的
-            right_list = []   # 存储j < oh and i > ow的
+        #     # 初始化三个列表
+        #     normal_list = []  # 存储j < oh and i < ow的
+        #     sub_list = []     # 存储j > oh 的
+        #     right_list = []   # 存储j < oh and i > ow的
             
-            # 收集所有非零元素的位置和值
-            for cin in range(current_input_group.shape[0]):
-                for i in range(in_h):
-                    for j in range(in_w):
-                        if current_input_group[cin, i, j] != 0:  # 支持非二进制输入
-                            # 确定卷积核旋转后的有效区域
-                            a = max(0, 2 - i)
-                            b = 2 if (i < out_h) else 5 - i
-                            c = max(0, 2 - j)
-                            d = 2 if (j < out_w) else 5 - j
-                            kernel_add = current_kernel_group[cin, a:b+1, c:d+1]
+        #     # 收集所有非零元素的位置和值
+        #     for cin in range(current_input_group.shape[0]):
+        #         for i in range(in_h):
+        #             for j in range(in_w):
+        #                 if current_input_group[cin, i, j] != 0:  # 支持非二进制输入
+        #                     # 确定卷积核旋转后的有效区域
+        #                     a = max(0, 2 - i)
+        #                     b = 2 if (i < out_h) else 5 - i
+        #                     c = max(0, 2 - j)
+        #                     d = 2 if (j < out_w) else 5 - j
+        #                     kernel_add = current_kernel_group[cin, a:b+1, c:d+1]
                             
-                            # 确定有效区域在输出矩阵中的位置
-                            m = i if (i < out_h) else out_h - 1
-                            n = j if (j < out_w) else out_w - 1
-                            x = m - (b - a)
-                            y = n - (d - c)
+        #                     # 确定有效区域在输出矩阵中的位置
+        #                     m = i if (i < out_h) else out_h - 1
+        #                     n = j if (j < out_w) else out_w - 1
+        #                     x = m - (b - a)
+        #                     y = n - (d - c)
                             
-                            # 根据位置分类
-                            spike_info = (cin, i, j, current_input_group[cin, i, j], kernel_add, x, m, y, n)
-                            if j < out_w and i < out_h:
-                                normal_list.append(spike_info)
-                            elif j >= out_w:
-                                sub_list.append(spike_info)
-                            elif j < out_w and i >= out_h:
-                                right_list.append(spike_info)
+        #                     # 根据位置分类
+        #                     spike_info = (cin, i, j, current_input_group[cin, i, j], kernel_add, x, m, y, n)
+        #                     if j < out_w and i < out_h:
+        #                         normal_list.append(spike_info)
+        #                     elif j >= out_w:
+        #                         sub_list.append(spike_info)
+        #                     elif j < out_w and i >= out_h:
+        #                         right_list.append(spike_info)
             
-            # 处理pack，每次从三个列表各取一个
-            while normal_list or sub_list or right_list:
-                # 从三个列表各弹出一个数据
-                pack = []
-                if normal_list:
-                    pack.append(normal_list.pop(0))
-                if sub_list:
-                    pack.append(sub_list.pop(0))
-                if right_list:
-                    pack.append(right_list.pop(0))
-                
-                # 处理pack中的每个spike
-                for spike_info in pack:
-                    cin, i, j, value, kernel_add, x, m, y, n = spike_info
-                    # 累加操作
-                    output_block[0, x:m+1, y:n+1] += value * kernel_add
-                    
-                    # 统计累加次数
-                    self.add_num += kernel_add.numel()
-                
-                # 假设每个pack仅需一拍即可完成计算
-                self.cycle_num += 1
+        #     len1 = len(normal_list)
+        #     len2 = len(sub_list)
+        #     len3 = len(right_list)
 
-        
+        #     # 处理pack，每次从三个列表各取一个
+        #     while normal_list or sub_list or right_list:
+        #         # 从三个列表各弹出一个数据
+        #         pack = []
+        #         if normal_list:
+        #             pack.append(normal_list.pop(0))
+        #         if sub_list:
+        #             pack.append(sub_list.pop(0))
+        #         if right_list:
+        #             pack.append(right_list.pop(0))
+                
+        #         # 处理pack中的每个spike
+        #         for spike_info in pack:
+        #             cin, i, j, value, kernel_add, x, m, y, n = spike_info
+        #             # 累加操作
+        #             output_block[0, x:m+1, y:n+1] += value * kernel_add
+                    
+        #             # 统计累加次数
+        #             self.add_num += kernel_add.numel()
+                
+        #         # 假设每个pack仅需一拍即可完成计算
+        #         self.cycle_num += 1
+
+        #         # 将每个tile中三个列表的长度都打印
+        #     print(f"normal_list: {len1}, sub_list: {len2}, right_list: {len3}, cycle: {self.cycle_num}")
+
+        # 方法3，根据if中spike位置，取weight和膜电位，进行累加，9个累加器
         # 计算输入块的稀疏度
         total_elements = in_c * in_h * in_w
         non_zero_elements = torch.count_nonzero(input_block).item()
@@ -170,11 +181,11 @@ class Core:
     核心计算单元，根据加速器配置实现功能
     每个core对应一个Cout，包含4个PE，PE之间并行工作
     """
-    def __init__(self, name, cout_idx, num_pes=4):
+    def __init__(self, name, cout_idx, num_pes=4, k=2):
         self.name = name
         self.cout_idx = cout_idx  # 对应哪个Cout
         self.num_pes = num_pes  # 固定为4个PE
-        self.pes = [PE(f"{name}_pe{i}", i) for i in range(num_pes)]
+        self.pes = [PE(f"{name}_pe{i}", i, k) for i in range(num_pes)]
         self.stats = Stats()    # 这个有啥用，为啥要重复统计
         self.total_add_num = 0
         self.total_tile_num = 0
@@ -339,9 +350,9 @@ class OutProductSimulator:
     外积卷积模拟器，根据加速器配置实现功能
     包含8个core，每个core对应一个Cout，所有core共享相同的input_tensor
     """
-    def __init__(self):
+    def __init__(self, k=2):
         self.num_cores = 8  # 固定为8个core
-        self.cores = [Core(f"core{i}", i, num_pes=4) for i in range(self.num_cores)]
+        self.cores = [Core(f"core{i}", i, num_pes=4, k=k) for i in range(self.num_cores)]
         self.global_stats = Stats()
         self.print_core_info = True  # 控制是否打印core信息，只打印一次
         
@@ -400,8 +411,8 @@ class OutProductSimulator:
         #tag,每个核处理时，先把所有时间步算完，膜电位就无需再切换，因为batch之间膜电位独立，time step之间膜电位有顺序
         for b in range(B):
             for t in range(T):
-                # 按group处理Cout,直到得到一个时间步的完整输出特征图
-                print("-batch:", b, "time step:", t,"-")
+                # tag,没有精确计算，仅计算group0，用于性能评估
+                print("-batch:", b, "time step:", t,"-","only group0")
                 group_idx = 0
                     # 获取当前T和B的输入张量 [Cin,H,W]
                 # todo,由于没有片上RAM限制，这里假设整个输入张量都可以 fit in memory
