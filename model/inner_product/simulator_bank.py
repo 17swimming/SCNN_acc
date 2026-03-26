@@ -1,4 +1,5 @@
 
+from utils import img2col
 import torch
 import numpy as np
 from collections import OrderedDict
@@ -79,102 +80,6 @@ class PE:
         return psum, self.cycle_num 
         
 
-# class PE:
-#     """
-#     PE中weights仅在切换cout和cin时进行切换
-#     其余时刻pe就是接收3*3 bits的act，然后执行计算，输出cycle和计算结果就好
-#     """
-#     #每次调用 pe.process() 时， add_num 和 cycle_num 只反映当前 act 的统计信息
-#     #pe.stats 则反映该 PE 自创建以来处理所有 act 的累计统计信息
-#     def __init__(self, weights, adder_num, name, pe_id, group_mode='diagonal'):
-#         self.pe_id = pe_id
-#         self.name = name
-#         self.stats = Stats()   
-#         self.adder_num = adder_num
-#         self.cycle_num = 0
-#         self.weights = weights #9个权重
-#         self.group_mode = group_mode
-#         # 定义分组方式
-#         self.groups = {
-#             'diagonal': {
-#                 0: [0, 4, 8],  # 左上、中心、右下
-#                 1: [1, 5, 6],  # 上中、右中、左下
-#                 2: [2, 3, 7]   # 右上、左中、下中
-#             },
-#             'row': {
-#                 0: [0, 1, 2],  # 第一行
-#                 1: [3, 4, 5],  # 第二行
-#                 2: [6, 7, 8]   # 第三行
-#             }
-#         }
-
-#     def process(self, act):
-#         """
-#         处理3*3的act（0/1值），返回累加结果psum和计算cycle
-        
-#         Args:
-#             act: 3*3的tensor，值为0或1，1表示对应的weight需要被累加
-            
-#         Returns:
-#             psum: 累加结果
-#             cycle: 计算所需的cycle数
-#         """
-#         # 将2D act转换为1D索引（0-8）   
-#         act_1d = act.reshape(-1)
-        
-#         # 初始化累加结果
-#         psum = 0
-        
-#         # 获取当前分组模式的分组
-#         current_groups = self.groups[self.group_mode]
-        
-#         # 统计每个组中的有效权重数量
-#         group_valid_counts = {}
-#         group_valid_weights = {}
-        
-#         for group_idx, positions in current_groups.items():
-#             valid_weights = []
-#             for pos in positions:
-#                 if act_1d[pos] == 1:
-#                     valid_weights.append(self.weights[pos])
-#             group_valid_counts[group_idx] = len(valid_weights)
-#         # 如果使用以存代算，group_valid_counts中3的情况直接改为1,其余情况保持不变
-#             if group_valid_counts[group_idx] == 3:
-#                 group_valid_counts[group_idx] = 1
-#             group_valid_weights[group_idx] = valid_weights
-        
-#         # 计算需要的cycle数（最坏情况是某个组有3个有效权重，需要3拍）
-#         max_group_count = max(group_valid_counts.values()) if group_valid_counts else 0
-#         self.cycle_num = max_group_count
-        
-#         # 初始化当前act的操作数
-#         add_num = 0
-        
-#         # 逐cycle计算
-#         for cycle in range(self.cycle_num):
-#             # 处理每个组的当前cycle的权重
-#             group_sums = []
-#             for group_idx, weights in group_valid_weights.items():
-#                 if cycle < len(weights):
-#                     group_sums.append(weights[cycle])
-#                     add_num += 1
-            
-#             # 加法树计算：组0和组1相加得到psum1，再和组2相加
-#             if len(group_sums) > 0:
-#                 if len(group_sums) >= 2:
-#                     psum1 = group_sums[0] + group_sums[1]
-#                     if len(group_sums) >= 3:
-#                         psum += psum1 + group_sums[2]
-#                     else:
-#                         psum += psum1
-#                 else:
-#                     psum += group_sums[0]
-        
-#         # 更新统计信息，持续统计
-#         self.stats.num_ops += add_num
-#         self.stats.compute_cycles += self.cycle_num  
-        
-#         return psum, self.cycle_num 
 
 class Core:
     """
@@ -323,8 +228,8 @@ class InnerProductSimulator:
     包含8个core，每个core对应一个Cout，所有core共享相同的input_tensor
     """
     def __init__(self):
-        self.num_cores = 16  # 固定为8个core
-        self.num_pes = 64  # 存储每个core的PE数目
+        self.num_cores = 64  # bank的深度
+        self.num_pes = 16  # 每个pe负责计算K中的一小段，比如9*16，那么就是16个cin
         self.RAM_size = 32*32*64
         self.bandwidth = 32
         self.weight_size = 16          # 16 btis的权重
@@ -391,6 +296,12 @@ class InnerProductSimulator:
         
         # 初始化输出张量 (T,B,Cout,H_out,W_out)
         output_tensor = torch.zeros((T, B, Cout, out_h, out_w), dtype=kernel_tensor.dtype, device=input_tensor.device)
+
+        #先通过img2col得到权重矩阵[K,N]和激活矩阵[B,T,M,K]
+        kernel_tensor = kernel_tensor.view(Cout, -1)  # [Cout, K]
+        for b in range(B):
+            input_tensor[b] = img2col(input_tensor[:,b,:,:,:], k_h, padding, stride)  # [T, M, K]
+
                 
         # ------------------- 切换权重------------------
         # 从DRAM加载self.num_cores个核的processed_cin个输入通道至core中，即每个core对应一个cout，然后core中每个PE放kernel的一个cin
