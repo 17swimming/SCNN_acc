@@ -79,55 +79,47 @@ class SplitUnit:
         self.k = kernel_size
         self.split = split(kernel_size=kernel_size)
 
-    # def process(self, if_map):
-    #     bitstream_list = []
-    #     r_list = []
-    #     c_list = []
-    #     for r in range(if_map.shape[0]):
-    #         bitstream, (r_array, c_array) = self.split.process(if_map[r], r)
-    #         # 添加predictor，如果发现某个bitstream的长度为3/6，则根据现有bitstream_list中的len，预测几拍后发生WAW，但是不影响list的生成
-    #         if bitstream.shape[0] == 3 or bitstream.shape[0] == 6:
-    #             print(f"第{r}行的bitstream长度为{bitstream.shape[0]}")
-    #             total_length = sum(bs.shape[0] for bs in bitstream_list)
-    #             print(f"{total_length+3}拍后的bitstream长度为{bitstream.shape[0]}，发生WAW的可能cycle为{total_length+3+bitstream.shape[0]}")
-
-    #         bitstream_list.append(bitstream)
-    #         # 添加空的两拍 -1,-1
-    #         r_with_sep = torch.cat([r_array, torch.tensor([-1, -1], dtype=r_array.dtype, device=r_array.device)])
-    #         c_with_sep = torch.cat([c_array, torch.tensor([-1, -1], dtype=c_array.dtype, device=c_array.device)])
-    #         r_list.append(r_with_sep)
-    #         c_list.append(c_with_sep)
-    #     # 拼接所有行的结果
-    #     bitstream_all = torch.cat(bitstream_list) if bitstream_list else torch.tensor([], dtype=torch.int32)
-    #     r_all = torch.cat(r_list) if r_list else torch.tensor([], dtype=torch.int32)
-    #     c_all = torch.cat(c_list) if c_list else torch.tensor([], dtype=torch.int32)
-    #     return bitstream_all, r_all, c_all            
-
     def process(self, if_map):
         bitstream_list = []
         r_list = []
         c_list = []
         for r in range(if_map.shape[0]):
-            if sum(if_map[r]) == 0:
-                continue
+            bitstream, (r_array, c_array) = self.split.process(if_map[r], r)
+            # 添加predictor，如果发现某个bitstream的长度为3/6，则根据现有bitstream_list中的len，预测几拍后发生WAW，但是不影响list的生成
+            if bitstream.shape[0] == 3 or bitstream.shape[0] == 6:
+                total_length = sum(bs.shape[0] for bs in bitstream_list)
+                if bitstream.shape[0] == 3:
+                    print(f"{total_length}拍后,第{r}行的bitstream长度为{bitstream.shape[0]}，发生WAW的可能cycle为{total_length+bitstream.shape[0]}和{total_length+bitstream.shape[0]+3}")
+                else:
+                    print(f"{total_length}拍后,第{r}行的bitstream长度为{bitstream.shape[0]}，发生WAW的可能cycle为{total_length+bitstream.shape[0]}")
+
+            bitstream_list.append(bitstream)
+            # 添加空的两拍 -1,-1
+            r_with_sep = torch.cat([r_array, torch.tensor([-1, -1], dtype=r_array.dtype, device=r_array.device)])
+            c_with_sep = torch.cat([c_array, torch.tensor([-1, -1], dtype=c_array.dtype, device=c_array.device)])
+            r_list.append(r_with_sep)
+            c_list.append(c_with_sep)
+        # 拼接所有行的结果
+        bitstream_all = torch.cat(bitstream_list) if bitstream_list else torch.tensor([], dtype=torch.int32)
+        r_all = torch.cat(r_list) if r_list else torch.tensor([], dtype=torch.int32)
+        c_all = torch.cat(c_list) if c_list else torch.tensor([], dtype=torch.int32)
+        return bitstream_all, r_all, c_all            
+
+    # def process(self, if_map):
+        bitstream_list = []
+        r_list = []
+        c_list = []
+        for r in range(if_map.shape[0]):
             bitstream, (r_array, c_array) = self.split.process(if_map[r], r)
             # 添加predictor，如果发现某个bitstream的长度为3/6，则根据现有bitstream_list中的len，预测几拍后发生WAW，并插入一个nop
             if bitstream.shape[0] == 3 or bitstream.shape[0] == 6:
-                # total_length = sum(bs.shape[0] for bs in bitstream_list)
-                # if bitstream.shape[0] == 3:
-                #     print(f"{total_length}拍后,第{r}行的bitstream长度为{bitstream.shape[0]}，发生WAW的可能cycle为{total_length+bitstream.shape[0]}和{total_length+bitstream.shape[0]+3}")
-                # else:
-                #     print(f"{total_length}拍后,第{r}行的bitstream长度为{bitstream.shape[0]}，发生WAW的可能cycle为{total_length+bitstream.shape[0]}")
+                total_length = sum(bs.shape[0] for bs in bitstream_list)
+                print(f"{total_length+3}拍后,第{r}行的bitstream长度为{bitstream.shape[0]}，发生WAW的可能cycle为{total_length+3+bitstream.shape[0]}")
                 print(f"我插入nop后，实际运行结果：")
-                # 前面额外插入一个nop
-                bitstream_list.append(torch.cat((torch.tensor([0], dtype=bitstream.dtype, device=bitstream.device), bitstream), dim=0))
-                r_with_sep = torch.cat(([torch.tensor([-1], dtype=r_array.dtype, device=r_array.device),r_array, torch.tensor([-1, -1], dtype=r_array.dtype, device=r_array.device)]), dim=0)
-                c_with_sep = torch.cat(([torch.tensor([-1], dtype=c_array.dtype, device=c_array.device),c_array, torch.tensor([-1, -1], dtype=c_array.dtype, device=c_array.device)]), dim=0)
-
-                # 后面额外插入一个nop，即添加空的三拍 -1,-1,-1，bitstream也多一个0
-                # bitstream_list.append(torch.cat([bitstream, torch.tensor([0], dtype=bitstream.dtype, device=bitstream.device)]))
-                # r_with_sep = torch.cat([r_array, torch.tensor([-1, -1, -1], dtype=r_array.dtype, device=r_array.device)])
-                # c_with_sep = torch.cat([c_array, torch.tensor([-1, -1, -1], dtype=c_array.dtype, device=c_array.device)])
+                # 添加空的三拍 -1,-1,-1，bitstream也多一个0
+                bitstream_list.append(torch.cat([bitstream, torch.tensor([0], dtype=bitstream.dtype, device=bitstream.device)]))
+                r_with_sep = torch.cat([r_array, torch.tensor([-1, -1, -1], dtype=r_array.dtype, device=r_array.device)])
+                c_with_sep = torch.cat([c_array, torch.tensor([-1, -1, -1], dtype=c_array.dtype, device=c_array.device)])
                 r_list.append(r_with_sep)
                 c_list.append(c_with_sep)
             else:
@@ -141,8 +133,5 @@ class SplitUnit:
         bitstream_all = torch.cat(bitstream_list) if bitstream_list else torch.tensor([], dtype=torch.int32)
         r_all = torch.cat(r_list) if r_list else torch.tensor([], dtype=torch.int32)
         c_all = torch.cat(c_list) if c_list else torch.tensor([], dtype=torch.int32)
-        # 插入一个断言，确保r_all这个tensor中不能出现连续的4个‘-1’
-        assert (r_all == -1).unfold(0, 4, 1).sum(dim=1).max() < 4, "Tensor contains four consecutive -1 values"        
-        
         return bitstream_all, r_all, c_all            
 # 

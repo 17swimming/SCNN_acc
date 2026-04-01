@@ -78,6 +78,7 @@ class SplitUnit:
     def __init__(self, kernel_size=3):
         self.k = kernel_size
         self.split = split(kernel_size=kernel_size)
+        self.hazard_num = 0
 
     # def process(self, if_map):
     #     bitstream_list = []
@@ -118,7 +119,8 @@ class SplitUnit:
                 #     print(f"{total_length}拍后,第{r}行的bitstream长度为{bitstream.shape[0]}，发生WAW的可能cycle为{total_length+bitstream.shape[0]}和{total_length+bitstream.shape[0]+3}")
                 # else:
                 #     print(f"{total_length}拍后,第{r}行的bitstream长度为{bitstream.shape[0]}，发生WAW的可能cycle为{total_length+bitstream.shape[0]}")
-                print(f"我插入nop后，实际运行结果：")
+                self.hazard_num += 1
+                # print(f"我插入nop后，实际运行结果：")
                 # 前面额外插入一个nop
                 bitstream_list.append(torch.cat((torch.tensor([0], dtype=bitstream.dtype, device=bitstream.device), bitstream), dim=0))
                 r_with_sep = torch.cat(([torch.tensor([-1], dtype=r_array.dtype, device=r_array.device),r_array, torch.tensor([-1, -1], dtype=r_array.dtype, device=r_array.device)]), dim=0)
@@ -142,7 +144,9 @@ class SplitUnit:
         r_all = torch.cat(r_list) if r_list else torch.tensor([], dtype=torch.int32)
         c_all = torch.cat(c_list) if c_list else torch.tensor([], dtype=torch.int32)
         # 插入一个断言，确保r_all这个tensor中不能出现连续的4个‘-1’
-        assert (r_all == -1).unfold(0, 4, 1).sum(dim=1).max() < 4, "Tensor contains four consecutive -1 values"        
-        
+        if len(r_all) >= 4:
+            assert (r_all == -1).unfold(0, 4, 1).sum(dim=1).max() < 4, "Tensor contains four consecutive -1 values"     
+        elif len(r_all) == 0:
+            print("当前cin全0")   
         return bitstream_all, r_all, c_all            
 # 

@@ -80,11 +80,10 @@ class Core:
 
         # 先经过split_unit，获取bitstream和c_array
         bitstream, r_array, c_array = self.split_unit.process(if_map)
-
-        print(f"len(c_array) = {len(c_array)}")
-        print(f"bitstream: {bitstream}")
-        print(f"r_array: {r_array}")
-        print(f"c_array: {c_array}")
+        # print(f"len(c_array) = {len(c_array)}")
+        # print(f"bitstream: {bitstream}")
+        # print(f"r_array: {r_array}")
+        # print(f"c_array: {c_array}")
         # 然后逐cycle 将bitstream流入pe,由于门控机制，整个bitstream流入后，计算就已经结束了。
         # 因为即使最后三行的bitstream只有3b，此时H-1行在w2，H-2行在w1，H-3行在w0，
         # 下一拍w2、w1、w0都输出结果，且后续w1和w都进入门控状态，计算已完成。
